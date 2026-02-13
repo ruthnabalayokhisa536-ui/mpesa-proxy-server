@@ -1,0 +1,18 @@
+{
+  "name": "mpesa-proxy-server",
+  "version": "1.0.0",
+  "description": "M-Pesa proxy server",
+  "main": "mpesa-proxy-server.js",
+  "scripts": {
+    "start": "node mpesa-proxy-server.js"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.39.0",
+    "cors": "^2.8.5",
+    "express": "^4.18.2",
+    "node-fetch": "^2.7.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
