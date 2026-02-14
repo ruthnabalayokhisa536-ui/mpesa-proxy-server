@@ -1,11 +1,14 @@
 /**
- * M-PESA PROXY SERVER
+ * M-PESA PROXY SERVER - FIXED VERSION
  * 
- * This is a standalone Node.js server that handles M-Pesa STK Push requests.
- * Deploy this to any hosting service (Vercel, Railway, Render, etc.)
- * Then store the URL as a secret in Supabase.
- * 
- * Deploy to: Vercel, Railway, Render, Heroku, or any Node.js hosting
+ * INSTRUCTIONS:
+ * 1. Go to: https://github.com/ruthnabalayokhisa536-ui/mpesa-proxy-server
+ * 2. Click on mpesa-proxy-server.js
+ * 3. Click the pencil icon (Edit)
+ * 4. Delete all content
+ * 5. Copy THIS ENTIRE FILE and paste it there
+ * 6. Scroll down and click "Commit changes"
+ * 7. Render will auto-deploy in ~1 minute
  */
 
 const express = require('express');
@@ -20,7 +23,7 @@ const PORT = process.env.PORT || 3000;
 app.use(cors());
 app.use(express.json());
 
-// M-Pesa Configuration (from environment variables)
+// M-Pesa Configuration
 const MPESA_CONSUMER_KEY = process.env.MPESA_CONSUMER_KEY || 'QwzCGC1fTPluVAXeNjxFTTDXsjklVKeL';
 const MPESA_CONSUMER_SECRET = process.env.MPESA_CONSUMER_SECRET || '6Uc2GeVcZBUGWHGT';
 const MPESA_SHORTCODE = process.env.MPESA_SHORTCODE || '000772';
@@ -87,7 +90,7 @@ app.get('/', (req, res) => {
   res.json({
     status: 'ok',
     service: 'M-Pesa Proxy Server',
-    version: '1.0.0',
+    version: '2.0.0',
     endpoints: {
       stkpush: 'POST /stkpush',
       callback: 'POST /callback',
@@ -101,13 +104,13 @@ app.get('/', (req, res) => {
  */
 app.post('/stkpush', async (req, res) => {
   try {
-    const { phone, amount, walletId, userId } = req.body;
+    const { phone, amount, userId } = req.body;
 
     // Validate request
-    if (!phone || !amount || !walletId) {
+    if (!phone || !amount || !userId) {
       return res.status(400).json({
         success: false,
-        error: 'phone, amount, and walletId are required',
+        error: 'phone, amount, and userId are required',
       });
     }
 
@@ -119,13 +122,20 @@ app.post('/stkpush', async (req, res) => {
     // Get callback URL
     const callbackUrl = process.env.CALLBACK_URL || `${req.protocol}://${req.get('host')}/callback`;
 
-    // Create pending transaction in database
+    // Create pending M-Pesa transaction in database
+    const merchantRequestId = `MR-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+    const checkoutRequestId = `CR-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+    
     const { data: tx, error: txError } = await supabase
-      .from('transactions')
+      .from('mpesa_transactions')
       .insert({
-        wallet_id: walletId,
-        type: 'deposit',
+        user_id: userId,
+        merchant_request_id: merchantRequestId,
+        checkout_request_id: checkoutRequestId,
+        phone_number: phoneNumber,
         amount: parseFloat(amount),
+        account_reference: `DEPOSIT-${userId.slice(0, 8)}`,
+        transaction_desc: 'Wallet Deposit',
         status: 'pending',
       })
       .select()
@@ -136,6 +146,7 @@ app.post('/stkpush', async (req, res) => {
       return res.status(500).json({
         success: false,
         error: 'Failed to create transaction',
+        details: txError.message,
       });
     }
 
@@ -150,7 +161,7 @@ app.post('/stkpush', async (req, res) => {
       PartyB: MPESA_SHORTCODE,
       PhoneNumber: phoneNumber,
       CallBackURL: callbackUrl,
-      AccountReference: tx.id,
+      AccountReference: tx.account_reference,
       TransactionDesc: 'Wallet Deposit',
     };
 
@@ -169,16 +180,23 @@ app.post('/stkpush', async (req, res) => {
     console.log('STK Push Response:', stkData);
 
     if (!stkResponse.ok || stkData.ResponseCode !== '0') {
+      // Delete the pending transaction since STK Push failed
+      await supabase
+        .from('mpesa_transactions')
+        .delete()
+        .eq('id', tx.id);
+
       return res.status(400).json({
         success: false,
         error: stkData.errorMessage || stkData.ResponseDescription || 'STK Push failed',
       });
     }
 
-    // Update transaction with checkout request ID
+    // Update transaction with actual M-Pesa IDs
     await supabase
-      .from('transactions')
+      .from('mpesa_transactions')
       .update({
+        merchant_request_id: stkData.MerchantRequestID,
         checkout_request_id: stkData.CheckoutRequestID,
       })
       .eq('id', tx.id);
@@ -216,20 +234,20 @@ app.post('/callback', async (req, res) => {
     const checkoutId = stkCallback.CheckoutRequestID;
     const resultCode = stkCallback.ResultCode;
 
-    // Get transaction
-    const { data: tx } = await supabase
-      .from('transactions')
+    // Get M-Pesa transaction
+    const { data: mpesaTx } = await supabase
+      .from('mpesa_transactions')
       .select('*')
       .eq('checkout_request_id', checkoutId)
       .single();
 
-    if (!tx) {
-      console.error('Transaction not found:', checkoutId);
+    if (!mpesaTx) {
+      console.error('M-Pesa transaction not found:', checkoutId);
       return res.json({ ResultCode: 0, ResultDesc: 'Transaction not found' });
     }
 
     // Check if already processed
-    if (tx.status === 'success') {
+    if (mpesaTx.status === 'completed') {
       return res.json({ ResultCode: 0, ResultDesc: 'Already processed' });
     }
 
@@ -239,45 +257,49 @@ app.post('/callback', async (req, res) => {
         (i) => i.Name === 'MpesaReceiptNumber'
       )?.Value || null;
 
-      // Get wallet
-      const { data: wallet } = await supabase
-        .from('wallets')
-        .select('balance')
-        .eq('id', tx.wallet_id)
-        .single();
+      const transactionDate = stkCallback.CallbackMetadata?.Item?.find(
+        (i) => i.Name === 'TransactionDate'
+      )?.Value || null;
 
-      if (!wallet) {
-        console.error('Wallet not found:', tx.wallet_id);
-        return res.json({ ResultCode: 1, ResultDesc: 'Wallet not found' });
+      // Update M-Pesa transaction
+      await supabase
+        .from('mpesa_transactions')
+        .update({
+          status: 'completed',
+          mpesa_receipt_number: receipt,
+          transaction_date: transactionDate,
+          result_code: resultCode,
+          result_desc: stkCallback.ResultDesc,
+        })
+        .eq('id', mpesaTx.id);
+
+      // Credit wallet using the credit_wallet function
+      const { error: creditError } = await supabase.rpc('credit_wallet', {
+        p_user_id: mpesaTx.user_id,
+        p_amount: mpesaTx.amount,
+        p_transaction_type: 'deposit',
+        p_description: `M-Pesa deposit - ${receipt}`,
+        p_reference: receipt,
+      });
+
+      if (creditError) {
+        console.error('Failed to credit wallet:', creditError);
+        return res.json({ ResultCode: 1, ResultDesc: 'Failed to credit wallet' });
       }
 
-      // Credit wallet
-      await supabase
-        .from('wallets')
-        .update({
-          balance: wallet.balance + tx.amount,
-        })
-        .eq('id', tx.wallet_id);
-
-      // Update transaction
-      await supabase
-        .from('transactions')
-        .update({
-          status: 'success',
-          mpesa_receipt: receipt,
-          reconciled: true,
-        })
-        .eq('id', tx.id);
-
-      console.log(`Wallet credited: ${tx.amount} KES for transaction ${tx.id}`);
+      console.log(`Wallet credited: ${mpesaTx.amount} KES for user ${mpesaTx.user_id}`);
     } else {
       // Failed payment
       await supabase
-        .from('transactions')
-        .update({ status: 'failed' })
-        .eq('id', tx.id);
+        .from('mpesa_transactions')
+        .update({
+          status: 'failed',
+          result_code: resultCode,
+          result_desc: stkCallback.ResultDesc,
+        })
+        .eq('id', mpesaTx.id);
 
-      console.log(`Payment failed for transaction ${tx.id}`);
+      console.log(`Payment failed for transaction ${mpesaTx.id}: ${stkCallback.ResultDesc}`);
     }
 
     res.json({ ResultCode: 0, ResultDesc: 'Success' });
