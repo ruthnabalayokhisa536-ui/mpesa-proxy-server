@@ -17,7 +17,38 @@ const MPESA_API_URL = 'https://api.safaricom.co.ke';
 
 const SUPABASE_URL = process.env.SUPABASE_URL || 'https://vnlevzndmktifkkdnrns.supabase.co';
 const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InZubGV2em5kbWt0aWZra2Rucm5zIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzA2OTM1OTUsImV4cCI6MjA4NjI2OTU5NX0.bM7gktjSmPmvV_YaDOBQbe76iwzUABe2sf2Cry3hiWU';
+
+// SMS Configuration
+const SMS_API_TOKEN = process.env.TALKSASA_API_TOKEN || '1956|W7r0b7vuSgcT2UqiYvFcKIodUOkSPlabpVtcVh4u7c347b80';
+const SMS_API_ENDPOINT = process.env.TALKSASA_API_ENDPOINT || 'https://bulksms.talksasa.com/api/v3';
+const SMS_SENDER_ID = 'ABAN_COOL';
+
 const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+async function sendSMS(phoneNumber, message) {
+  try {
+    const response = await fetch(`${SMS_API_ENDPOINT}/sms/send`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${SMS_API_TOKEN}`,
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+      },
+      body: JSON.stringify({
+        sender_id: SMS_SENDER_ID,
+        recipient: phoneNumber,
+        message: message,
+      }),
+    });
+
+    const data = await response.json();
+    console.log('SMS sent:', data);
+    return data;
+  } catch (error) {
+    console.error('SMS error:', error);
+    return null;
+  }
+}
 
 async function getAccessToken() {
   const auth = Buffer.from(`${MPESA_CONSUMER_KEY}:${MPESA_CONSUMER_SECRET}`).toString('base64');
@@ -47,8 +78,8 @@ function formatPhoneNumber(phone) {
 app.get('/', (req, res) => {
   res.json({
     status: 'ok',
-    service: 'M-Pesa Proxy Server',
-    version: '2.0.0',
+    service: 'M-Pesa Proxy Server with SMS',
+    version: '2.1.0',
     endpoints: { stkpush: 'POST /stkpush', callback: 'POST /callback', health: 'GET /' },
   });
 });
@@ -156,6 +187,21 @@ app.post('/callback', async (req, res) => {
       const receipt = stkCallback.CallbackMetadata?.Item?.find(i => i.Name === 'MpesaReceiptNumber')?.Value || null;
       const transactionDate = stkCallback.CallbackMetadata?.Item?.find(i => i.Name === 'TransactionDate')?.Value || null;
 
+      // Get user profile for SMS
+      const { data: profile } = await supabase
+        .from('profiles')
+        .select('full_name, phone')
+        .eq('id', mpesaTx.user_id)
+        .single();
+
+      // Get wallet info
+      const { data: wallet } = await supabase
+        .from('wallets')
+        .select('balance, wallet_number')
+        .eq('user_id', mpesaTx.user_id)
+        .single();
+
+      // Update transaction
       await supabase.from('mpesa_transactions').update({
         status: 'completed',
         mpesa_receipt_number: receipt,
@@ -164,20 +210,27 @@ app.post('/callback', async (req, res) => {
         result_desc: stkCallback.ResultDesc,
       }).eq('id', mpesaTx.id);
 
-      const { error: creditError } = await supabase.rpc('credit_wallet', {
-        p_user_id: mpesaTx.user_id,
-        p_amount: mpesaTx.amount,
-        p_transaction_type: 'deposit',
-        p_description: `M-Pesa deposit - ${receipt}`,
-        p_reference: receipt,
-      });
-
-      if (creditError) {
-        console.error('Failed to credit wallet:', creditError);
-        return res.json({ ResultCode: 1, ResultDesc: 'Failed to credit wallet' });
-      }
+      // Update wallet balance
+      const newBalance = (wallet?.balance || 0) + mpesaTx.amount;
+      await supabase.from('wallets').update({
+        balance: newBalance,
+        updated_at: new Date().toISOString(),
+      }).eq('user_id', mpesaTx.user_id);
 
       console.log(`Wallet credited: ${mpesaTx.amount} KES for user ${mpesaTx.user_id}`);
+
+      // Send SMS notification
+      if (profile?.phone) {
+        const smsMessage = `ABAN_COOL: Confirmed. You have deposited KES ${mpesaTx.amount.toFixed(2)} to your AbanRemit Wallet.\n` +
+          `Receipt: ${receipt}\n` +
+          `New Balance: KES ${newBalance.toFixed(2)}\n` +
+          `Wallet: ${wallet?.wallet_number || 'N/A'}\n` +
+          `Account: ${profile.full_name || 'Your Account'}\n` +
+          `Thank you for using AbanRemit!`;
+        
+        await sendSMS(profile.phone, smsMessage);
+        console.log(`SMS sent to ${profile.phone}`);
+      }
     } else {
       await supabase.from('mpesa_transactions').update({
         status: 'failed',
@@ -196,9 +249,9 @@ app.post('/callback', async (req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`M-Pesa Proxy Server running on port ${PORT}`);
+  console.log(`M-Pesa Proxy Server with SMS running on port ${PORT}`);
   console.log('Endpoints:');
   console.log('  - POST /stkpush - Initiate STK Push');
-  console.log('  - POST /callback - M-Pesa callback');
+  console.log('  - POST /callback - M-Pesa callback with SMS notification');
   console.log('  - GET / - Health check');
 });
