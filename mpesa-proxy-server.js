@@ -1,257 +1,217 @@
+// M-Pesa Proxy Server - Simple Version for Lovable Supabase
+// Deploy this to Render.com
+
 const express = require('express');
+const axios = require('axios');
 const cors = require('cors');
-const fetch = require('node-fetch');
-const { createClient } = require('@supabase/supabase-js');
 
 const app = express();
-const PORT = process.env.PORT || 3000;
-
 app.use(cors());
 app.use(express.json());
 
-const MPESA_CONSUMER_KEY = process.env.MPESA_CONSUMER_KEY || 'QwzCGC1fTPluVAXeNjxFTTDXsjklVKeL';
-const MPESA_CONSUMER_SECRET = process.env.MPESA_CONSUMER_SECRET || '6Uc2GeVcZBUGWHGT';
-const MPESA_SHORTCODE = process.env.MPESA_SHORTCODE || '000772';
-const MPESA_PASSKEY = process.env.MPESA_PASSKEY || 'b309881157d87125c7f87ffffde6448ab10f90e3dce7c4d8efab190482896018';
-const MPESA_API_URL = 'https://api.safaricom.co.ke';
+// M-Pesa Credentials
+const CONSUMER_KEY = process.env.MPESA_CONSUMER_KEY || 'QwzCGC1fTPluVAXeNjxFTTDXsjklVKeL';
+const CONSUMER_SECRET = process.env.MPESA_CONSUMER_SECRET || '6Uc2GeVcZBUGWHGT';
+const SHORT_CODE = process.env.MPESA_SHORT_CODE || '000772';
+const PASSKEY = process.env.MPESA_PASSKEY || 'b309881157d87125c7f87ffffde6448ab10f90e3dce7c4d8efab190482896018';
+const CALLBACK_URL = process.env.MPESA_CALLBACK_URL || 'https://mpesa-proxy-server-2.onrender.com/callback';
 
-const SUPABASE_URL = process.env.SUPABASE_URL || 'https://vnlevzndmktifkkdnrns.supabase.co';
-const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InZubGV2em5kbWt0aWZra2Rucm5zIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzA2OTM1OTUsImV4cCI6MjA4NjI2OTU5NX0.bM7gktjSmPmvV_YaDOBQbe76iwzUABe2sf2Cry3hiWU';
+// Supabase Configuration (using anon key is safe for this)
+const SUPABASE_URL = 'https://vnlevzndmktifkkdnrns.supabase.co';
+const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY || 'your_anon_key_here';
 
-// SMS Configuration
-const SMS_API_TOKEN = process.env.TALKSASA_API_TOKEN || '1956|W7r0b7vuSgcT2UqiYvFcKIodUOkSPlabpVtcVh4u7c347b80';
-const SMS_API_ENDPOINT = process.env.TALKSASA_API_ENDPOINT || 'https://bulksms.talksasa.com/api/v3';
-const SMS_SENDER_ID = 'ABAN_COOL';
-
-const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
-
-async function sendSMS(phoneNumber, message) {
-  try {
-    const response = await fetch(`${SMS_API_ENDPOINT}/sms/send`, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${SMS_API_TOKEN}`,
-        'Content-Type': 'application/json',
-        'Accept': 'application/json',
-      },
-      body: JSON.stringify({
-        sender_id: SMS_SENDER_ID,
-        recipient: phoneNumber,
-        message: message,
-      }),
-    });
-
-    const data = await response.json();
-    console.log('SMS sent:', data);
-    return data;
-  } catch (error) {
-    console.error('SMS error:', error);
-    return null;
-  }
-}
-
+// Get OAuth token
 async function getAccessToken() {
-  const auth = Buffer.from(`${MPESA_CONSUMER_KEY}:${MPESA_CONSUMER_SECRET}`).toString('base64');
-  const response = await fetch(`${MPESA_API_URL}/oauth/v1/generate?grant_type=client_credentials`, {
-    method: 'GET',
-    headers: { 'Authorization': `Basic ${auth}` },
-  });
-  if (!response.ok) throw new Error(`Failed to get access token: ${response.statusText}`);
-  const data = await response.json();
-  return data.access_token;
+  const auth = Buffer.from(`${CONSUMER_KEY}:${CONSUMER_SECRET}`).toString('base64');
+  const response = await axios.get(
+    'https://api.safaricom.co.ke/oauth/v1/generate?grant_type=client_credentials',
+    { headers: { Authorization: `Basic ${auth}` } }
+  );
+  return response.data.access_token;
 }
 
-function generatePassword() {
-  const timestamp = new Date().toISOString().replace(/[^0-9]/g, '').slice(0, 14);
-  const password = Buffer.from(`${MPESA_SHORTCODE}${MPESA_PASSKEY}${timestamp}`).toString('base64');
-  return { password, timestamp };
-}
-
-function formatPhoneNumber(phone) {
-  let cleaned = phone.replace(/\D/g, '');
-  if (cleaned.startsWith('0')) cleaned = '254' + cleaned.slice(1);
-  else if (cleaned.startsWith('+254')) cleaned = cleaned.slice(1);
-  else if (!cleaned.startsWith('254')) cleaned = '254' + cleaned;
-  return cleaned;
-}
-
+// Health check
 app.get('/', (req, res) => {
   res.json({
     status: 'ok',
-    service: 'M-Pesa Proxy Server with SMS',
-    version: '2.1.0',
-    endpoints: { stkpush: 'POST /stkpush', callback: 'POST /callback', health: 'GET /' },
+    service: 'M-Pesa Proxy Server (Lovable)',
+    version: '3.1.0',
+    endpoints: {
+      stkpush: 'POST /stkpush',
+      callback: 'POST /callback',
+      health: 'GET /'
+    }
   });
 });
 
+// STK Push endpoint
 app.post('/stkpush', async (req, res) => {
   try {
-    const { phone, amount, userId } = req.body;
+    const { phone, amount, userId, accountReference, transactionDesc } = req.body;
+
     if (!phone || !amount || !userId) {
-      return res.status(400).json({ success: false, error: 'phone, amount, and userId are required' });
-    }
-
-    const accessToken = await getAccessToken();
-    const { password, timestamp } = generatePassword();
-    const phoneNumber = formatPhoneNumber(phone);
-    const callbackUrl = process.env.CALLBACK_URL || `${req.protocol}://${req.get('host')}/callback`;
-
-    const merchantRequestId = `MR-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
-    const checkoutRequestId = `CR-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
-    
-    const { data: tx, error: txError } = await supabase.from('mpesa_transactions').insert({
-      user_id: userId,
-      merchant_request_id: merchantRequestId,
-      checkout_request_id: checkoutRequestId,
-      phone_number: phoneNumber,
-      amount: parseFloat(amount),
-      account_reference: `DEPOSIT-${userId.slice(0, 8)}`,
-      transaction_desc: 'Wallet Deposit',
-      status: 'pending',
-    }).select().single();
-
-    if (txError) {
-      console.error('Database error:', txError);
-      return res.status(500).json({ success: false, error: 'Failed to create transaction', details: txError.message });
-    }
-
-    const stkPayload = {
-      BusinessShortCode: MPESA_SHORTCODE,
-      Password: password,
-      Timestamp: timestamp,
-      TransactionType: 'CustomerPayBillOnline',
-      Amount: Math.round(amount),
-      PartyA: phoneNumber,
-      PartyB: MPESA_SHORTCODE,
-      PhoneNumber: phoneNumber,
-      CallBackURL: callbackUrl,
-      AccountReference: tx.account_reference,
-      TransactionDesc: 'Wallet Deposit',
-    };
-
-    console.log('STK Push Request:', { ...stkPayload, Password: '***' });
-
-    const stkResponse = await fetch(`${MPESA_API_URL}/mpesa/stkpush/v1/processrequest`, {
-      method: 'POST',
-      headers: { 'Authorization': `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify(stkPayload),
-    });
-
-    const stkData = await stkResponse.json();
-    console.log('STK Push Response:', stkData);
-
-    if (!stkResponse.ok || stkData.ResponseCode !== '0') {
-      await supabase.from('mpesa_transactions').delete().eq('id', tx.id);
       return res.status(400).json({
         success: false,
-        error: stkData.errorMessage || stkData.ResponseDescription || 'STK Push failed',
+        error: 'Missing required fields: phone, amount, userId'
       });
     }
 
-    await supabase.from('mpesa_transactions').update({
-      merchant_request_id: stkData.MerchantRequestID,
-      checkout_request_id: stkData.CheckoutRequestID,
-    }).eq('id', tx.id);
+    // Format phone number
+    let formattedPhone = phone.replace(/\s/g, '');
+    if (formattedPhone.startsWith('0')) {
+      formattedPhone = '254' + formattedPhone.substring(1);
+    } else if (formattedPhone.startsWith('+')) {
+      formattedPhone = formattedPhone.substring(1);
+    }
+
+    // Generate timestamp and password
+    const timestamp = new Date().toISOString().replace(/[^0-9]/g, '').slice(0, 14);
+    const password = Buffer.from(`${SHORT_CODE}${PASSKEY}${timestamp}`).toString('base64');
+
+    // Get access token
+    const accessToken = await getAccessToken();
+
+    // STK Push request
+    const stkResponse = await axios.post(
+      'https://api.safaricom.co.ke/mpesa/stkpush/v1/processrequest',
+      {
+        BusinessShortCode: SHORT_CODE,
+        Password: password,
+        Timestamp: timestamp,
+        TransactionType: 'CustomerPayBillOnline',
+        Amount: Math.floor(amount),
+        PartyA: formattedPhone,
+        PartyB: SHORT_CODE,
+        PhoneNumber: formattedPhone,
+        CallBackURL: CALLBACK_URL,
+        AccountReference: accountReference || `DEPOSIT-${userId.slice(0, 8)}`,
+        TransactionDesc: transactionDesc || 'Wallet Deposit'
+      },
+      {
+        headers: { Authorization: `Bearer ${accessToken}` }
+      }
+    );
+
+    console.log('✅ STK Push successful:', stkResponse.data);
+
+    // Save to Supabase using REST API
+    try {
+      await axios.post(
+        `${SUPABASE_URL}/rest/v1/mpesa_transactions`,
+        {
+          user_id: userId,
+          merchant_request_id: stkResponse.data.MerchantRequestID,
+          checkout_request_id: stkResponse.data.CheckoutRequestID,
+          phone_number: formattedPhone,
+          amount: amount,
+          account_reference: accountReference || `DEPOSIT-${userId.slice(0, 8)}`,
+          transaction_desc: transactionDesc || 'Wallet Deposit',
+          status: 'pending'
+        },
+        {
+          headers: {
+            'apikey': SUPABASE_ANON_KEY,
+            'Authorization': `Bearer ${SUPABASE_ANON_KEY}`,
+            'Content-Type': 'application/json',
+            'Prefer': 'return=minimal'
+          }
+        }
+      );
+      console.log('✅ Transaction saved to database');
+    } catch (dbError) {
+      console.error('❌ Database error:', dbError.response?.data || dbError.message);
+    }
 
     res.json({
       success: true,
       message: 'STK Push sent successfully',
-      checkoutRequestId: stkData.CheckoutRequestID,
-      merchantRequestId: stkData.MerchantRequestID,
+      checkoutRequestId: stkResponse.data.CheckoutRequestID,
+      merchantRequestId: stkResponse.data.MerchantRequestID
     });
+
   } catch (error) {
-    console.error('STK Push error:', error);
-    res.status(500).json({ success: false, error: error.message });
+    console.error('❌ STK Push error:', error.response?.data || error.message);
+    res.status(500).json({
+      success: false,
+      error: error.response?.data?.errorMessage || error.message
+    });
   }
 });
 
+// M-Pesa Callback endpoint
 app.post('/callback', async (req, res) => {
   try {
-    const { Body } = req.body;
-    const { stkCallback } = Body || {};
-    if (!stkCallback) return res.json({ ResultCode: 0, ResultDesc: 'Invalid callback' });
+    console.log('📥 M-Pesa Callback received:', JSON.stringify(req.body, null, 2));
 
-    console.log('M-Pesa Callback:', stkCallback);
-    const checkoutId = stkCallback.CheckoutRequestID;
-    const resultCode = stkCallback.ResultCode;
+    const { Body: { stkCallback } } = req.body;
+    const {
+      MerchantRequestID,
+      CheckoutRequestID,
+      ResultCode,
+      ResultDesc,
+      CallbackMetadata
+    } = stkCallback;
 
-    const { data: mpesaTx } = await supabase.from('mpesa_transactions').select('*').eq('checkout_request_id', checkoutId).single();
-    if (!mpesaTx) {
-      console.error('M-Pesa transaction not found:', checkoutId);
-      return res.json({ ResultCode: 0, ResultDesc: 'Transaction not found' });
+    // Extract metadata
+    let amount = 0;
+    let mpesaReceiptNumber = '';
+    let transactionDate = '';
+
+    if (CallbackMetadata && CallbackMetadata.Item) {
+      for (const item of CallbackMetadata.Item) {
+        if (item.Name === 'Amount') amount = item.Value;
+        if (item.Name === 'MpesaReceiptNumber') mpesaReceiptNumber = item.Value;
+        if (item.Name === 'TransactionDate') transactionDate = item.Value;
+      }
     }
 
-    if (mpesaTx.status === 'completed') return res.json({ ResultCode: 0, ResultDesc: 'Already processed' });
-
-    if (resultCode === 0) {
-      const receipt = stkCallback.CallbackMetadata?.Item?.find(i => i.Name === 'MpesaReceiptNumber')?.Value || null;
-      const transactionDate = stkCallback.CallbackMetadata?.Item?.find(i => i.Name === 'TransactionDate')?.Value || null;
-
-      // Get user profile for SMS
-      const { data: profile } = await supabase
-        .from('profiles')
-        .select('full_name, phone')
-        .eq('id', mpesaTx.user_id)
-        .single();
-
-      // Get wallet info
-      const { data: wallet } = await supabase
-        .from('wallets')
-        .select('balance, wallet_number')
-        .eq('user_id', mpesaTx.user_id)
-        .single();
-
-      // Update transaction
-      await supabase.from('mpesa_transactions').update({
-        status: 'completed',
-        mpesa_receipt_number: receipt,
-        transaction_date: transactionDate,
-        result_code: resultCode,
-        result_desc: stkCallback.ResultDesc,
-      }).eq('id', mpesaTx.id);
-
-      // Update wallet balance
-      const newBalance = (wallet?.balance || 0) + mpesaTx.amount;
-      await supabase.from('wallets').update({
-        balance: newBalance,
-        updated_at: new Date().toISOString(),
-      }).eq('user_id', mpesaTx.user_id);
-
-      console.log(`Wallet credited: ${mpesaTx.amount} KES for user ${mpesaTx.user_id}`);
-
-      // Send SMS notification
-      if (profile?.phone) {
-        const smsMessage = `ABAN_COOL: Confirmed. You have deposited KES ${mpesaTx.amount.toFixed(2)} to your AbanRemit Wallet.\n` +
-          `Receipt: ${receipt}\n` +
-          `New Balance: KES ${newBalance.toFixed(2)}\n` +
-          `Wallet: ${wallet?.wallet_number || 'N/A'}\n` +
-          `Account: ${profile.full_name || 'Your Account'}\n` +
-          `Thank you for using AbanRemit!`;
-        
-        await sendSMS(profile.phone, smsMessage);
-        console.log(`SMS sent to ${profile.phone}`);
-      }
-    } else {
-      await supabase.from('mpesa_transactions').update({
-        status: 'failed',
-        result_code: resultCode,
-        result_desc: stkCallback.ResultDesc,
-      }).eq('id', mpesaTx.id);
-
-      console.log(`Payment failed for transaction ${mpesaTx.id}: ${stkCallback.ResultDesc}`);
+    // Update Supabase using REST API
+    try {
+      await axios.patch(
+        `${SUPABASE_URL}/rest/v1/mpesa_transactions?checkout_request_id=eq.${CheckoutRequestID}`,
+        {
+          result_code: ResultCode,
+          result_desc: ResultDesc,
+          mpesa_receipt_number: mpesaReceiptNumber,
+          transaction_date: transactionDate,
+          status: ResultCode === 0 ? 'completed' : 'failed',
+          updated_at: new Date().toISOString()
+        },
+        {
+          headers: {
+            'apikey': SUPABASE_ANON_KEY,
+            'Authorization': `Bearer ${SUPABASE_ANON_KEY}`,
+            'Content-Type': 'application/json',
+            'Prefer': 'return=minimal'
+          }
+        }
+      );
+      
+      console.log('✅ Transaction updated in database');
+      console.log(`   Status: ${ResultCode === 0 ? 'completed ✅' : 'failed ❌'}`);
+      console.log(`   Amount: KES ${amount}`);
+      console.log(`   Receipt: ${mpesaReceiptNumber}`);
+      console.log('   🎯 Database trigger will auto-credit wallet!');
+      
+    } catch (dbError) {
+      console.error('❌ Database update error:', dbError.response?.data || dbError.message);
     }
 
     res.json({ ResultCode: 0, ResultDesc: 'Success' });
+
   } catch (error) {
-    console.error('Callback error:', error);
-    res.json({ ResultCode: 1, ResultDesc: error.message });
+    console.error('❌ Callback error:', error);
+    res.json({ ResultCode: 1, ResultDesc: 'Failed' });
   }
 });
 
+const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
-  console.log(`M-Pesa Proxy Server with SMS running on port ${PORT}`);
-  console.log('Endpoints:');
-  console.log('  - POST /stkpush - Initiate STK Push');
-  console.log('  - POST /callback - M-Pesa callback with SMS notification');
-  console.log('  - GET / - Health check');
+  console.log(`🚀 M-Pesa Proxy Server running on port ${PORT}`);
+  console.log(`📍 Endpoints:`);
+  console.log(`   - POST /stkpush - Initiate STK Push`);
+  console.log(`   - POST /callback - M-Pesa callback`);
+  console.log(`   - GET / - Health check`);
+  console.log(`🔗 Supabase: ${SUPABASE_URL}`);
+  console.log(`✨ Auto-credit enabled via database trigger`);
 });
