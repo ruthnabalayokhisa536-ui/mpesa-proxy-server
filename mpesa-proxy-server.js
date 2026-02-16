@@ -12,7 +12,7 @@ app.use(express.json());
 // M-Pesa Credentials
 const CONSUMER_KEY = process.env.MPESA_CONSUMER_KEY || 'QwzCGC1fTPluVAXeNjxFTTDXsjklVKeL';
 const CONSUMER_SECRET = process.env.MPESA_CONSUMER_SECRET || '6Uc2GeVcZBUGWHGT';
-const SHORT_CODE = process.env.MPESA_SHORT_CODE || '000772';
+const SHORT_CODE = process.env.MPESA_SHORTCODE || '000772';
 const PASSKEY = process.env.MPESA_PASSKEY || 'b309881157d87125c7f87ffffde6448ab10f90e3dce7c4d8efab190482896018';
 const CALLBACK_URL = process.env.MPESA_CALLBACK_URL || 'https://mpesa-proxy-server-2.onrender.com/callback';
 
